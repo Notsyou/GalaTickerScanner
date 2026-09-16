@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
 <title>Autumn Blush — Check-in</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
 <style>
   :root {
     --bg: #171310;
@@ -41,14 +41,21 @@
   #status-pill.ready { color: var(--valid); border-color: var(--valid); }
   #status-pill.error { color: var(--used); border-color: var(--used); }
 
-  #scan-area { flex: 1; position: relative; background: #000; min-height: 0; }
+  #scan-area { flex: 1; position: relative; background: #000; min-height: 0; overflow: hidden; }
   #reader { width: 100%; height: 100%; }
-  #reader video { width: 100% !important; height: 100% !important; object-fit: cover; }
+  #reader video, #reader canvas { width: 100% !important; height: 100% !important; object-fit: cover; position: absolute; top: 0; left: 0; }
+
+  #scan-guide {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 70%; height: 90px; border: 2px solid var(--accent);
+    border-radius: 8px; pointer-events: none; z-index: 5;
+  }
 
   #loading {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 10px; color: var(--muted);
-    font-size: 13px; text-align: center; padding: 0 30px;
+    font-size: 13px; text-align: center; padding: 0 30px; z-index: 6;
+    background: #000;
   }
   #loading .spinner {
     width: 26px; height: 26px; border-radius: 50%;
@@ -128,6 +135,7 @@
 
   <div id="scan-area">
     <div id="reader"></div>
+    <div id="scan-guide"></div>
     <div id="loading">
       <div class="spinner"></div>
       <div>Loading guest list — point the camera at the ticket once ready.</div>
@@ -140,7 +148,6 @@
     <button id="manual-toggle" onclick="toggleManualEntry()">Can't scan? Enter ticket ID manually</button>
   </footer>
 </div>
-<div id="file-reader" style="display:none;"></div>
 
 <div id="manual-entry">
   <div id="manual-panel">
@@ -162,62 +169,93 @@
 </div>
 
 <script>
-  // ---- CONFIG — set this to your deployed Apps Script Web App /exec URL ----
-  const GUEST_LIST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
-  const CHECKIN_POST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
+  // ---- CONFIG ----
+  var GUEST_LIST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
+  var CHECKIN_POST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
 
-  let guestList = {};       // ticketId -> guest object, cached in memory
-  let sessionCount = 0;
-  let scanningLocked = false; // prevents double-processing the same frame
+  var guestList = {};
+  var sessionCount = 0;
+  var scanningLocked = false;
+  var quaggaRunning = false;
 
-  async function loadGuestList(isRefresh) {
-    try {
-      const res = await fetch(GUEST_LIST_URL);
-      const data = await res.json();
+  function loadGuestList(isRefresh) {
+    fetch(GUEST_LIST_URL)
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        data.forEach(function(g) {
+          var key = g.ticketId.trim().toUpperCase();
+          var existing = guestList[key];
+          guestList[key] = {
+            ticketId: g.ticketId,
+            name: g.name,
+            checkedIn: (existing && existing.checkedIn) || g.checkedIn,
+            checkedInAt: (existing && existing.checkedInAt) || g.checkedInAt
+          };
+        });
 
-      data.forEach(g => {
-        const key = g.ticketId.trim().toUpperCase();
-        const existing = guestList[key];
-        guestList[key] = {
-          ticketId: g.ticketId,
-          name: g.name,
-          checkedIn: (existing && existing.checkedIn) || g.checkedIn,
-          checkedInAt: (existing && existing.checkedInAt) || g.checkedInAt
-        };
+        console.log((isRefresh ? "Refreshed" : "Loaded") + " ticket IDs:", Object.keys(guestList));
+        document.getElementById("status-pill").textContent =
+          Object.keys(guestList).length + " guests · synced " + new Date().toLocaleTimeString();
+        document.getElementById("status-pill").className = "ready";
+
+        if (!isRefresh) {
+          document.getElementById("loading").style.display = "none";
+          startScanner();
+        }
+      })
+      .catch(function(err) {
+        if (!isRefresh) {
+          document.getElementById("status-pill").textContent = "failed to load list";
+          document.getElementById("status-pill").className = "error";
+          document.getElementById("loading").innerHTML =
+            "<div>Couldn't load the guest list. Check your connection and reload this page before scanning.</div>";
+        }
       });
-
-      console.log((isRefresh ? "Refreshed" : "Loaded") + " ticket IDs:", Object.keys(guestList));
-      document.getElementById("status-pill").textContent =
-        Object.keys(guestList).length + " guests · synced " + new Date().toLocaleTimeString();
-      document.getElementById("status-pill").className = "ready";
-
-      if (!isRefresh) {
-        document.getElementById("loading").style.display = "none";
-        startScanner();
-      }
-    } catch (err) {
-      if (!isRefresh) {
-        document.getElementById("status-pill").textContent = "failed to load list";
-        document.getElementById("status-pill").className = "error";
-        document.getElementById("loading").innerHTML =
-          "<div>Couldn't load the guest list. Check your connection and reload this page before scanning.</div>";
-      }
-    }
   }
 
   function startScanner() {
-    const scanner = new Html5Qrcode("reader");
-    const config = {
-      fps: 10,
-      qrbox: { width: 280, height: 120 },
-      formatsToSupport: [ Html5QrcodeSupportedFormats.CODE_128 ]
-    };
-    scanner.start(
-      { facingMode: "environment" },
-      config,
-      onScanSuccess,
-      () => {}
-    );
+    Quagga.init({
+      inputStream: {
+        name: "Live",
+        type: "LiveStream",
+        target: document.querySelector("#reader"),
+        constraints: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      },
+      locator: {
+        patchSize: "large",
+        halfSample: false
+      },
+      numOfWorkers: 2,
+      frequency: 10,
+      decoder: {
+        readers: ["code_128_reader"]
+      },
+      locate: true
+    }, function(err) {
+      if (err) {
+        console.error("Quagga init error:", err);
+        document.getElementById("status-pill").textContent = "camera error";
+        document.getElementById("status-pill").className = "error";
+        return;
+      }
+      Quagga.start();
+      quaggaRunning = true;
+    });
+
+    Quagga.onDetected(function(result) {
+      if (!result || !result.codeResult || !result.codeResult.code) return;
+      onScanSuccess(result.codeResult.code);
+    });
+  }
+
+  function onScanSuccess(ticketId) {
+    if (scanningLocked) return;
+    scanningLocked = true;
+    handleTicket(ticketId.trim());
   }
 
   function captureAndScan() {
@@ -231,34 +269,23 @@
     canvas.width = video.videoWidth || 1280;
     canvas.height = video.videoHeight || 720;
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    var dataUrl = canvas.toDataURL("image/png");
 
-    canvas.toBlob(function(blob) {
-      if (!blob) {
-        showResult("unknown", "✕", "Capture failed", "Try again", "");
-        return;
+    Quagga.decodeSingle({
+      decoder: { readers: ["code_128_reader"] },
+      locate: true,
+      src: dataUrl
+    }, function(result) {
+      if (result && result.codeResult && result.codeResult.code) {
+        handleTicket(result.codeResult.code.trim());
+      } else {
+        showResult("unknown", "✕", "Couldn't read it", "Try holding steadier and closer, then capture again", "");
       }
-      var file = new File([blob], "capture.png", { type: "image/png" });
-      var fileScanner = new Html5Qrcode("file-reader");
-      fileScanner.scanFile(file, false)
-        .then(function(decodedText) {
-          fileScanner.clear();
-          handleTicket(decodedText.trim());
-        })
-        .catch(function() {
-          fileScanner.clear();
-          showResult("unknown", "✕", "Couldn't read it", "Try holding steadier and closer, then capture again", "");
-        });
-    }, "image/png");
-  }
-
-  function onScanSuccess(ticketId) {
-    if (scanningLocked) return;
-    scanningLocked = true;
-    handleTicket(ticketId.trim());
+    });
   }
 
   function handleTicket(ticketId) {
-    const guest = guestList[ticketId.trim().toUpperCase()];
+    var guest = guestList[ticketId.trim().toUpperCase()];
 
     if (!guest) {
       showResult("unknown", "✕", "Not recognized", "Ticket not found — " + ticketId, "");
@@ -283,11 +310,11 @@
     fetch(CHECKIN_POST_URL, {
       method: "POST",
       body: JSON.stringify({ ticketId: ticketId, checkedInAt: timestamp })
-    }).catch(() => {});
+    }).catch(function() {});
   }
 
   function showResult(kind, icon, name, message, sub) {
-    const el = document.getElementById("result");
+    var el = document.getElementById("result");
     el.className = "show " + kind;
     document.getElementById("result-icon").textContent = icon;
     document.getElementById("result-name").textContent = name;
@@ -301,7 +328,7 @@
   }
 
   function toggleManualEntry() {
-    const el = document.getElementById("manual-entry");
+    var el = document.getElementById("manual-entry");
     el.classList.toggle("show");
     if (el.classList.contains("show")) {
       document.getElementById("manual-input").value = "";
@@ -310,14 +337,14 @@
   }
 
   function submitManualEntry() {
-    const id = document.getElementById("manual-input").value.trim();
+    var id = document.getElementById("manual-input").value.trim();
     if (!id) return;
     toggleManualEntry();
     handleTicket(id);
   }
 
   loadGuestList(false);
-  setInterval(() => loadGuestList(true), 60000);
+  setInterval(function() { loadGuestList(true); }, 60000);
 </script>
 </body>
 </html>
