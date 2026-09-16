@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
+<title>Autumn Blush — Check-in</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #171310;
+    --panel: #241d18;
+    --ink: #f4ece1;
+    --muted: #b9a996;
+    --accent: #e8734a;
+    --valid: #3f9d5c;
+    --used: #c94c3f;
+    --unknown: #4a4038;
+    --line: #3a3128;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #app { height: 100%; display: flex; flex-direction: column; }
+
+  header {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+  header h1 span { color: var(--accent); }
+  #status-pill {
+    font-size: 11px; padding: 4px 10px; border-radius: 999px;
+    background: var(--panel); color: var(--muted); border: 1px solid var(--line);
+  }
+  #status-pill.ready { color: var(--valid); border-color: var(--valid); }
+  #status-pill.error { color: var(--used); border-color: var(--used); }
+
+  #scan-area { flex: 1; position: relative; background: #000; min-height: 0; }
+  #reader { width: 100%; height: 100%; }
+  #reader video { width: 100% !important; height: 100% !important; object-fit: cover; }
+
+  #loading {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; color: var(--muted);
+    font-size: 13px; text-align: center; padding: 0 30px;
+  }
+  #loading .spinner {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer {
+    padding: 10px 18px; flex-shrink: 0; border-top: 1px solid var(--line);
+    text-align: center;
+  }
+  #scan-count { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  #manual-toggle {
+    background: none; border: none; color: var(--accent);
+    font-size: 13px; text-decoration: underline; padding: 4px;
+  }
+
+  #manual-entry {
+    position: fixed; inset: 0; z-index: 30; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.6); padding: 24px;
+  }
+  #manual-entry.show { display: flex; }
+  #manual-panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 24px; width: 100%; max-width: 340px;
+  }
+  #manual-panel p { margin: 0 0 12px; font-size: 14px; color: var(--muted); }
+  #manual-input {
+    width: 100%; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+    font-size: 16px; margin-bottom: 14px;
+  }
+  #manual-buttons { display: flex; gap: 10px; }
+  #manual-buttons button {
+    flex: 1; padding: 12px; border-radius: 10px; border: none;
+    font-size: 14px; font-weight: 600;
+  }
+  #manual-cancel { background: var(--bg); color: var(--muted); }
+  #manual-submit { background: var(--accent); color: #fff; }
+
+  #result {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 32px;
+  }
+  #result.show { display: flex; }
+  #result.valid { background: var(--valid); }
+  #result.used { background: var(--used); }
+  #result.unknown { background: var(--unknown); }
+
+  #result .icon { font-size: 56px; line-height: 1; margin-bottom: 18px; }
+  #result .name { font-size: 30px; font-weight: 700; margin: 0 0 6px; }
+  #result .message { font-size: 16px; opacity: 0.9; margin: 0; }
+  #result .sub { font-size: 13px; opacity: 0.75; margin-top: 14px; }
+
+  #result .dismiss {
+    margin-top: 34px; padding: 12px 28px; border-radius: 10px;
+    background: rgba(0,0,0,0.2); color: #fff; border: none;
+    font-size: 14px; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Autumn Blush <span>· Check-in</span></h1>
+    <div id="status-pill">loading guest list…</div>
+  </header>
+
+  <div id="scan-area">
+    <div id="reader"></div>
+    <div id="loading">
+      <div class="spinner"></div>
+      <div>Loading guest list — point the camera at the ticket once ready.</div>
+    </div>
+  </div>
+
+  <footer>
+    <div id="scan-count">0 checked in this session</div>
+    <button id="manual-toggle" onclick="toggleManualEntry()">Can't scan? Enter ticket ID manually</button>
+  </footer>
+</div>
+
+<div id="manual-entry">
+  <div id="manual-panel">
+    <p>Enter ticket ID</p>
+    <input type="text" id="manual-input" placeholder="e.g. AB-3-SEMZ" autocapitalize="characters">
+    <div id="manual-buttons">
+      <button id="manual-cancel" onclick="toggleManualEntry()">Cancel</button>
+      <button id="manual-submit" onclick="submitManualEntry()">Check in</button>
+    </div>
+  </div>
+</div>
+
+<div id="result">
+  <div class="icon" id="result-icon"></div>
+  <div class="name" id="result-name"></div>
+  <p class="message" id="result-message"></p>
+  <div class="sub" id="result-sub"></div>
+  <button class="dismiss" onclick="dismissResult()">Scan next</button>
+</div>
+
+<script>
+  // ---- CONFIG — set this to your deployed Apps Script Web App /exec URL ----
+  const GUEST_LIST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
+  const CHECKIN_POST_URL = "https://script.google.com/macros/s/AKfycbyPYAw-kyvqG3wAMohaL8VSlL1QXNWSrDTjAYuGc9aLmRf0t2X2x-qDcABrwr7sv7_H/exec";
+
+  let guestList = {};       // ticketId -> guest object, cached in memory
+  let sessionCount = 0;
+  let scanningLocked = false; // prevents double-processing the same frame
+
+  async function loadGuestList(isRefresh) {
+    try {
+      const res = await fetch(GUEST_LIST_URL);
+      const data = await res.json();
+
+      data.forEach(g => {
+        const key = g.ticketId.trim().toUpperCase();
+        const existing = guestList[key];
+        // Merge instead of overwrite: never downgrade a locally-confirmed
+        // check-in back to false just because the server hasn't caught up yet.
+        guestList[key] = {
+          ticketId: g.ticketId,
+          name: g.name,
+          checkedIn: (existing && existing.checkedIn) || g.checkedIn,
+          checkedInAt: (existing && existing.checkedInAt) || g.checkedInAt
+        };
+      });
+
+      console.log((isRefresh ? "Refreshed" : "Loaded") + " ticket IDs:", Object.keys(guestList));
+      document.getElementById("status-pill").textContent =
+        Object.keys(guestList).length + " guests · synced " + new Date().toLocaleTimeString();
+      document.getElementById("status-pill").className = "ready";
+
+      if (!isRefresh) {
+        document.getElementById("loading").style.display = "none";
+        startScanner();
+      }
+    } catch (err) {
+      if (!isRefresh) {
+        document.getElementById("status-pill").textContent = "failed to load list";
+        document.getElementById("status-pill").className = "error";
+        document.getElementById("loading").innerHTML =
+          "<div>Couldn't load the guest list. Check your connection and reload this page before scanning.</div>";
+      }
+      // On a background refresh failure, silently keep using the cached list —
+      // no need to interrupt an in-progress check-in line over a blip.
+    }
+  }
+
+  function startScanner() {
+    const scanner = new Html5Qrcode("reader");
+    const config = {
+      fps: 10,
+      qrbox: { width: 280, height: 120 },
+      formatsToSupport: [ Html5QrcodeSupportedFormats.CODE_128 ]
+    };
+    scanner.start(
+      { facingMode: "environment" },
+      config,
+      onScanSuccess,
+      () => {} // ignore per-frame "no code found" noise
+    );
+  }
+
+  function onScanSuccess(ticketId) {
+    if (scanningLocked) return;
+    scanningLocked = true;
+    handleTicket(ticketId.trim());
+  }
+
+  function handleTicket(ticketId) {
+    const guest = guestList[ticketId.trim().toUpperCase()];
+
+    if (!guest) {
+      showResult("unknown", "✕", "Not recognized", "Ticket not found — " + ticketId, "");
+      return;
+    }
+    if (guest.checkedIn) {
+      showResult("used", "⚠", guest.name, "Already checked in", guest.checkedInAt ? "at " + guest.checkedInAt : "");
+      return;
+    }
+
+    guest.checkedIn = true;
+    guest.checkedInAt = new Date().toLocaleTimeString();
+    sessionCount++;
+    document.getElementById("scan-count").textContent = sessionCount + " checked in this session";
+    showResult("valid", "✓", guest.name, "Entry approved", "");
+
+    // Background sync — fire and forget, doesn't block the next scan
+    queueCheckinSync(ticketId, guest.checkedInAt);
+  }
+
+  function queueCheckinSync(ticketId, timestamp) {
+    if (CHECKIN_POST_URL.indexOf("PASTE_YOUR") === 0) return; // not wired up yet
+    fetch(CHECKIN_POST_URL, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: ticketId, checkedInAt: timestamp })
+    }).catch(() => { /* retried by next full sync — fine to ignore here */ });
+  }
+
+  function showResult(kind, icon, name, message, sub) {
+    const el = document.getElementById("result");
+    el.className = "show " + kind;
+    document.getElementById("result-icon").textContent = icon;
+    document.getElementById("result-name").textContent = name;
+    document.getElementById("result-message").textContent = message;
+    document.getElementById("result-sub").textContent = sub;
+  }
+
+  function dismissResult() {
+    document.getElementById("result").className = "";
+    scanningLocked = false;
+  }
+
+  function toggleManualEntry() {
+    const el = document.getElementById("manual-entry");
+    el.classList.toggle("show");
+    if (el.classList.contains("show")) {
+      document.getElementById("manual-input").value = "";
+      document.getElementById("manual-input").focus();
+    }
+  }
+
+  function submitManualEntry() {
+    const id = document.getElementById("manual-input").value.trim();
+    if (!id) return;
+    toggleManualEntry();
+    handleTicket(id);
+  }
+
+  loadGuestList(false);
+  setInterval(() => loadGuestList(true), 60000); // background refresh every 1 minute
+</script>
+</body>
+</html>
