@@ -178,8 +178,6 @@
       data.forEach(g => {
         const key = g.ticketId.trim().toUpperCase();
         const existing = guestList[key];
-        // Merge instead of overwrite: never downgrade a locally-confirmed
-        // check-in back to false just because the server hasn't caught up yet.
         guestList[key] = {
           ticketId: g.ticketId,
           name: g.name,
@@ -204,48 +202,49 @@
         document.getElementById("loading").innerHTML =
           "<div>Couldn't load the guest list. Check your connection and reload this page before scanning.</div>";
       }
-      // On a background refresh failure, silently keep using the cached list —
-      // no need to interrupt an in-progress check-in line over a blip.
     }
   }
 
-  let liveScanner = null; // keep a reference so capture mode can pause/resume it
-
   function startScanner() {
-    liveScanner = new Html5Qrcode("reader");
+    const scanner = new Html5Qrcode("reader");
     const config = {
       fps: 10,
       qrbox: { width: 280, height: 120 },
       formatsToSupport: [ Html5QrcodeSupportedFormats.CODE_128 ]
     };
-    liveScanner.start(
-      { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+    scanner.start(
+      { facingMode: "environment" },
       config,
       onScanSuccess,
-      () => {} // ignore per-frame "no code found" noise
+      () => {}
     );
   }
 
   function captureAndScan() {
-    const video = document.querySelector("#reader video");
-    if (!video) return;
+    var video = document.querySelector("#reader video");
+    if (!video) {
+      showResult("unknown", "✕", "Camera not ready", "Wait a moment and try again", "");
+      return;
+    }
 
-    // Draw the current frame at the video's full native resolution —
-    // not the CSS-stretched display size — for the sharpest possible still.
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    var canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    canvas.toBlob(blob => {
-      const file = new File([blob], "capture.png", { type: "image/png" });
-      const fileScanner = new Html5Qrcode("file-reader");
+    canvas.toBlob(function(blob) {
+      if (!blob) {
+        showResult("unknown", "✕", "Capture failed", "Try again", "");
+        return;
+      }
+      var file = new File([blob], "capture.png", { type: "image/png" });
+      var fileScanner = new Html5Qrcode("file-reader");
       fileScanner.scanFile(file, false)
-        .then(decodedText => {
+        .then(function(decodedText) {
           fileScanner.clear();
           handleTicket(decodedText.trim());
         })
-        .catch(() => {
+        .catch(function() {
           fileScanner.clear();
           showResult("unknown", "✕", "Couldn't read it", "Try holding steadier and closer, then capture again", "");
         });
@@ -276,16 +275,15 @@
     document.getElementById("scan-count").textContent = sessionCount + " checked in this session";
     showResult("valid", "✓", guest.name, "Entry approved", "");
 
-    // Background sync — fire and forget, doesn't block the next scan
     queueCheckinSync(ticketId, guest.checkedInAt);
   }
 
   function queueCheckinSync(ticketId, timestamp) {
-    if (CHECKIN_POST_URL.indexOf("PASTE_YOUR") === 0) return; // not wired up yet
+    if (CHECKIN_POST_URL.indexOf("PASTE_YOUR") === 0) return;
     fetch(CHECKIN_POST_URL, {
       method: "POST",
       body: JSON.stringify({ ticketId: ticketId, checkedInAt: timestamp })
-    }).catch(() => { /* retried by next full sync — fine to ignore here */ });
+    }).catch(() => {});
   }
 
   function showResult(kind, icon, name, message, sub) {
@@ -319,7 +317,7 @@
   }
 
   loadGuestList(false);
-  setInterval(() => loadGuestList(true), 60000); // background refresh every 1 minute
+  setInterval(() => loadGuestList(true), 60000);
 </script>
 </body>
 </html>
