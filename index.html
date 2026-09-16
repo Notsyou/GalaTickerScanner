@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
 <title>Autumn Blush — Check-in</title>
-<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
 <style>
   :root {
     --bg: #171310;
@@ -40,10 +39,12 @@
   }
   #status-pill.ready { color: var(--valid); border-color: var(--valid); }
   #status-pill.error { color: var(--used); border-color: var(--used); }
+  #engine-tag {
+    font-size: 10px; color: var(--muted); margin-top: 2px;
+  }
 
   #scan-area { flex: 1; position: relative; background: #000; min-height: 0; overflow: hidden; }
-  #reader { width: 100%; height: 100%; }
-  #reader video, #reader canvas { width: 100% !important; height: 100% !important; object-fit: cover; position: absolute; top: 0; left: 0; }
+  #reader-video { width: 100%; height: 100%; object-fit: cover; }
 
   #scan-guide {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -129,12 +130,15 @@
 <body>
 <div id="app">
   <header>
-    <h1>Autumn Blush <span>· Check-in</span></h1>
+    <div>
+      <h1>Autumn Blush <span>· Check-in</span></h1>
+      <div id="engine-tag">detecting scan engine…</div>
+    </div>
     <div id="status-pill">loading guest list…</div>
   </header>
 
   <div id="scan-area">
-    <div id="reader"></div>
+    <video id="reader-video" autoplay playsinline muted></video>
     <div id="scan-guide"></div>
     <div id="loading">
       <div class="spinner"></div>
@@ -176,7 +180,9 @@
   var guestList = {};
   var sessionCount = 0;
   var scanningLocked = false;
-  var quaggaRunning = false;
+  var detector = null;
+  var videoEl = null;
+  var detectLoopHandle = null;
 
   function loadGuestList(isRefresh) {
     fetch(GUEST_LIST_URL)
@@ -200,7 +206,7 @@
 
         if (!isRefresh) {
           document.getElementById("loading").style.display = "none";
-          startScanner();
+          initScanner();
         }
       })
       .catch(function(err) {
@@ -213,43 +219,55 @@
       });
   }
 
-  function startScanner() {
-    Quagga.init({
-      inputStream: {
-        name: "Live",
-        type: "LiveStream",
-        target: document.querySelector("#reader"),
-        constraints: {
-          facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        }
-      },
-      locator: {
-        patchSize: "large",
-        halfSample: false
-      },
-      numOfWorkers: 2,
-      frequency: 10,
-      decoder: {
-        readers: ["code_128_reader"]
-      },
-      locate: true
-    }, function(err) {
-      if (err) {
-        console.error("Quagga init error:", err);
-        document.getElementById("status-pill").textContent = "camera error";
-        document.getElementById("status-pill").className = "error";
-        return;
-      }
-      Quagga.start();
-      quaggaRunning = true;
-    });
+  function initScanner() {
+    getDetector()
+      .then(function(det) {
+        detector = det;
+        return startCamera();
+      })
+      .then(function() {
+        detectLoopHandle = setInterval(runDetection, 200);
+      })
+      .catch(function(err) {
+        console.error("Scanner init failed:", err);
+        document.getElementById("engine-tag").textContent = "camera/detector error — use manual entry";
+      });
+  }
 
-    Quagga.onDetected(function(result) {
-      if (!result || !result.codeResult || !result.codeResult.code) return;
-      onScanSuccess(result.codeResult.code);
+  // Prefer the browser's native BarcodeDetector (same engine Google Lens uses).
+  // Fall back to a WASM-based polyfill only if native support is missing.
+  function getDetector() {
+    if ("BarcodeDetector" in window) {
+      document.getElementById("engine-tag").textContent = "engine: native BarcodeDetector";
+      return Promise.resolve(new BarcodeDetector({ formats: ["code_128"] }));
+    }
+    document.getElementById("engine-tag").textContent = "engine: WASM fallback (loading…)";
+    return import("https://cdn.jsdelivr.net/npm/barcode-detector@2/dist/es/pure.min.js")
+      .then(function(mod) {
+        document.getElementById("engine-tag").textContent = "engine: WASM fallback";
+        return new mod.BarcodeDetector({ formats: ["code_128"] });
+      });
+  }
+
+  function startCamera() {
+    return navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+    }).then(function(stream) {
+      videoEl = document.getElementById("reader-video");
+      videoEl.srcObject = stream;
+      return videoEl.play();
     });
+  }
+
+  function runDetection() {
+    if (!detector || !videoEl || scanningLocked) return;
+    detector.detect(videoEl)
+      .then(function(barcodes) {
+        if (barcodes && barcodes.length > 0) {
+          onScanSuccess(barcodes[0].rawValue);
+        }
+      })
+      .catch(function() { /* ignore per-frame detection errors */ });
   }
 
   function onScanSuccess(ticketId) {
@@ -259,29 +277,31 @@
   }
 
   function captureAndScan() {
-    var video = document.querySelector("#reader video");
-    if (!video) {
+    if (!videoEl) {
       showResult("unknown", "✕", "Camera not ready", "Wait a moment and try again", "");
+      return;
+    }
+    if (!detector) {
+      showResult("unknown", "✕", "Scanner not ready", "Wait a moment and try again", "");
       return;
     }
 
     var canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    var dataUrl = canvas.toDataURL("image/png");
+    canvas.width = videoEl.videoWidth || 1280;
+    canvas.height = videoEl.videoHeight || 720;
+    canvas.getContext("2d").drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
-    Quagga.decodeSingle({
-      decoder: { readers: ["code_128_reader"] },
-      locate: true,
-      src: dataUrl
-    }, function(result) {
-      if (result && result.codeResult && result.codeResult.code) {
-        handleTicket(result.codeResult.code.trim());
-      } else {
+    detector.detect(canvas)
+      .then(function(barcodes) {
+        if (barcodes && barcodes.length > 0) {
+          handleTicket(barcodes[0].rawValue.trim());
+        } else {
+          showResult("unknown", "✕", "Couldn't read it", "Try holding steadier and closer, then capture again", "");
+        }
+      })
+      .catch(function() {
         showResult("unknown", "✕", "Couldn't read it", "Try holding steadier and closer, then capture again", "");
-      }
-    });
+      });
   }
 
   function handleTicket(ticketId) {
